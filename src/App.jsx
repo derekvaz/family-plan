@@ -214,6 +214,49 @@ const isSameDay = (d1, d2) => {
          d1.getDate() === d2.getDate();
 };
 
+// Check if a date matches a recurring event pattern
+const matchesRecurringPattern = (event, date) => {
+  if (!event.recurring?.enabled) return false;
+
+  const { frequency, days } = event.recurring;
+  if (!days || days.length === 0) return false;
+
+  // Get day name of the date we're checking
+  const dayName = DAYS_OF_WEEK[date.getDay()];
+
+  // Check if this day is in the recurring days
+  if (!days.includes(dayName)) return false;
+
+  const eventStart = new Date(event.startTime);
+  eventStart.setHours(0, 0, 0, 0);
+  const checkDate = new Date(date);
+  checkDate.setHours(0, 0, 0, 0);
+
+  // Don't show recurring events before their start date
+  if (checkDate < eventStart) return false;
+
+  // For weekly, just match the day
+  if (frequency === 'weekly') {
+    return true;
+  }
+
+  // For biweekly, check if we're in the right week (every other week from start)
+  if (frequency === 'biweekly') {
+    const msPerWeek = 7 * 24 * 60 * 60 * 1000;
+    const weeksDiff = Math.floor((checkDate.getTime() - eventStart.getTime()) / msPerWeek);
+    return weeksDiff % 2 === 0;
+  }
+
+  // For monthly, match the same week-of-month position
+  if (frequency === 'monthly') {
+    const startWeekOfMonth = Math.floor((eventStart.getDate() - 1) / 7);
+    const dateWeekOfMonth = Math.floor((date.getDate() - 1) / 7);
+    return startWeekOfMonth === dateWeekOfMonth;
+  }
+
+  return false;
+};
+
 const formatTime = (date) => {
   const d = new Date(date);
   return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
@@ -1580,7 +1623,47 @@ export default function FamilyPlannerApp() {
   }, [events, filter]);
   
   const getEventsForDay = useCallback((date) => {
-    return filteredEvents.filter(event => isSameDay(new Date(event.startTime), date));
+    const results = [];
+
+    for (const event of filteredEvents) {
+      const eventDate = new Date(event.startTime);
+      const isOriginalDate = isSameDay(eventDate, date);
+
+      // For non-recurring events, only show on original date
+      if (!event.recurring?.enabled) {
+        if (isOriginalDate) {
+          results.push(event);
+        }
+        continue;
+      }
+
+      // For recurring events, check if this date matches the pattern
+      if (matchesRecurringPattern(event, date)) {
+        if (isOriginalDate) {
+          // On the original date, show the original event
+          results.push(event);
+        } else {
+          // On other matching dates, create a virtual occurrence
+          const start = new Date(event.startTime);
+          const end = new Date(event.endTime);
+
+          const newStart = new Date(date);
+          newStart.setHours(start.getHours(), start.getMinutes(), start.getSeconds(), 0);
+
+          const newEnd = new Date(date);
+          newEnd.setHours(end.getHours(), end.getMinutes(), end.getSeconds(), 0);
+
+          results.push({
+            ...event,
+            startTime: newStart.toISOString(),
+            endTime: newEnd.toISOString(),
+            isRecurringOccurrence: true,
+          });
+        }
+      }
+    }
+
+    return results;
   }, [filteredEvents]);
   
   const handleTouchStart = (e) => { touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }; };
