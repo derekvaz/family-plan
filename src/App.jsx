@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { 
-  Plus, X, CheckCircle, Circle, ChevronLeft, ChevronRight, 
-  Trash2, Clock, Calendar, Check, Settings, UserPlus, Edit2
+import {
+  Plus, X, CheckCircle, Circle, ChevronLeft, ChevronRight,
+  Trash2, Clock, Calendar, Check, Settings, UserPlus, Edit2, Repeat
 } from 'lucide-react';
 
 // Accessible color palette for family members
@@ -218,8 +218,12 @@ const isSameDay = (d1, d2) => {
 const matchesRecurringPattern = (event, date) => {
   if (!event.recurring?.enabled) return false;
 
-  const { frequency, days } = event.recurring;
+  const { frequency, days, exceptions = [], endDate } = event.recurring;
   if (!days || days.length === 0) return false;
+
+  // Check if this date is in the exceptions list (deleted occurrences)
+  const dateStr = new Date(date).toISOString().split('T')[0];
+  if (exceptions.includes(dateStr)) return false;
 
   // Get day name of the date we're checking
   const dayName = DAYS_OF_WEEK[date.getDay()];
@@ -235,6 +239,13 @@ const matchesRecurringPattern = (event, date) => {
   // Don't show recurring events before their start date
   if (checkDate < eventStart) return false;
 
+  // Don't show recurring events after the end date
+  if (endDate) {
+    const endDateTime = new Date(endDate);
+    endDateTime.setHours(23, 59, 59, 999);
+    if (checkDate > endDateTime) return false;
+  }
+
   // For weekly, just match the day
   if (frequency === 'weekly') {
     return true;
@@ -249,9 +260,23 @@ const matchesRecurringPattern = (event, date) => {
 
   // For monthly, match the same week-of-month position
   if (frequency === 'monthly') {
+    // Check if we're in the same week position within the month
     const startWeekOfMonth = Math.floor((eventStart.getDate() - 1) / 7);
     const dateWeekOfMonth = Math.floor((date.getDate() - 1) / 7);
-    return startWeekOfMonth === dateWeekOfMonth;
+
+    if (startWeekOfMonth !== dateWeekOfMonth) return false;
+
+    // Also verify the months are actually separated by whole months
+    // Calculate month difference
+    const startYear = eventStart.getFullYear();
+    const startMonth = eventStart.getMonth();
+    const checkYear = checkDate.getFullYear();
+    const checkMonth = checkDate.getMonth();
+
+    const monthDiff = (checkYear - startYear) * 12 + (checkMonth - startMonth);
+
+    // Should be a non-negative whole number of months
+    return monthDiff >= 0;
   }
 
   return false;
@@ -383,7 +408,7 @@ const saveMembersToStorage = (members) => {
 // Event Card Component
 const EventCard = ({ event, onClick, style, familyMembers }) => {
   const getMember = (id) => familyMembers.find(m => m.id === id);
-  
+
   const getBackground = (assignees) => {
     if (assignees.length === 1) {
       const member = getMember(assignees[0]);
@@ -392,21 +417,25 @@ const EventCard = ({ event, onClick, style, familyMembers }) => {
     const colors = assignees.map(id => getMember(id)?.lightColor || '#E5E7EB');
     return `linear-gradient(135deg, ${colors.join(', ')})`;
   };
-  
+
   const getOutlineColor = (assignees) => {
     const member = getMember(assignees[0]);
     return member?.color || '#9CA3AF';
   };
-  
+
   const getTextColor = (assignees) => {
     const member = getMember(assignees[0]);
     return member?.textColor || '#1F2937';
   };
-  
+
+  // Check if this specific occurrence is completed
+  const dateStr = new Date(event.startTime).toISOString().split('T')[0];
+  const isCompleted = (event.completions || []).includes(dateStr);
+
   const background = getBackground(event.assignees);
   const textColor = getTextColor(event.assignees);
   const outlineColor = event.isChore ? getOutlineColor(event.assignees) : 'transparent';
-  
+
   return (
     <div
       onClick={(e) => { e.stopPropagation(); onClick(event); }}
@@ -421,20 +450,23 @@ const EventCard = ({ event, onClick, style, familyMembers }) => {
       }}
     >
       {event.isChore && (
-        event.completed ? 
+        isCompleted ?
           <CheckCircle size={12} style={{ color: textColor, flexShrink: 0, marginTop: 1 }} /> :
           <Circle size={12} style={{ color: textColor, flexShrink: 0, marginTop: 1 }} />
       )}
       <span
-        className="text-xs font-medium overflow-hidden text-ellipsis whitespace-nowrap pt-0.5"
+        className="text-xs font-medium overflow-hidden text-ellipsis whitespace-nowrap pt-0.5 flex items-center gap-0.5"
         style={{
           color: textColor,
-          textDecoration: event.completed ? 'line-through' : 'none',
-          opacity: event.completed ? 0.7 : 1,
+          textDecoration: isCompleted ? 'line-through' : 'none',
+          opacity: isCompleted ? 0.7 : 1,
           lineHeight: '1.1',
         }}
       >
         {event.title}
+        {event.isRecurringOccurrence && (
+          <Repeat size={10} style={{ color: textColor, flexShrink: 0, opacity: 0.6 }} />
+        )}
       </span>
     </div>
   );
@@ -470,11 +502,14 @@ const AllDayEvent = ({ event, onClick, familyMembers }) => {
       className="rounded px-2 py-0.5 cursor-pointer shadow-sm hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-500 overflow-hidden"
       style={{ background }}
     >
-      <span 
-        className="text-xs font-medium overflow-hidden text-ellipsis whitespace-nowrap block" 
+      <span
+        className="text-xs font-medium overflow-hidden text-ellipsis whitespace-nowrap flex items-center gap-1"
         style={{ color: textColor, lineHeight: '1.2' }}
       >
         {event.title}
+        {event.isRecurringOccurrence && (
+          <Repeat size={10} style={{ color: textColor, flexShrink: 0, opacity: 0.6 }} />
+        )}
       </span>
     </div>
   );
@@ -484,14 +519,16 @@ const AllDayEvent = ({ event, onClick, familyMembers }) => {
 const EventDetailOverlay = ({ event, onClose, onUpdate, onDelete, familyMembers }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editedEvent, setEditedEvent] = useState(null);
-  
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showEditConfirm, setShowEditConfirm] = useState(false);
+
   useEffect(() => {
     if (event) {
       setEditedEvent({ ...event });
       setIsEditing(false);
     }
   }, [event]);
-  
+
   if (!event || !editedEvent) return null;
   
   const startDate = new Date(event.startTime);
@@ -509,7 +546,83 @@ const EventDetailOverlay = ({ event, onClose, onUpdate, onDelete, familyMembers 
   
   const handleSaveEdit = () => {
     if (!editedEvent.title.trim()) return;
+
+    // If this is a recurring occurrence (not the original), show confirmation
+    if (event.isRecurringOccurrence && event.recurring?.enabled) {
+      setShowEditConfirm(true);
+      return;
+    }
+
     onUpdate(editedEvent);
+    setIsEditing(false);
+  };
+
+  const handleDeleteClick = () => {
+    // If this is a recurring occurrence, show confirmation dialog
+    if (event.isRecurringOccurrence || (!event.isRecurringOccurrence && event.recurring?.enabled)) {
+      setShowDeleteConfirm(true);
+    } else {
+      onDelete(event.id);
+      onClose();
+    }
+  };
+
+  const handleDeleteOccurrence = () => {
+    // Add this date to the exceptions list
+    const dateStr = new Date(event.startTime).toISOString().split('T')[0];
+    const exceptions = event.recurring?.exceptions || [];
+
+    onUpdate({
+      ...event,
+      recurring: {
+        ...event.recurring,
+        exceptions: [...exceptions, dateStr]
+      }
+    });
+
+    setShowDeleteConfirm(false);
+    onClose();
+  };
+
+  const handleDeleteAll = () => {
+    onDelete(event.id);
+    setShowDeleteConfirm(false);
+    onClose();
+  };
+
+  const handleEditOccurrence = () => {
+    // For editing a single occurrence, we need to:
+    // 1. Add exception for this date
+    // 2. Create a new one-time event for this date with the edited values
+    const dateStr = new Date(event.startTime).toISOString().split('T')[0];
+    const exceptions = event.recurring?.exceptions || [];
+
+    // Update original event with exception
+    onUpdate({
+      ...event,
+      recurring: {
+        ...event.recurring,
+        exceptions: [...exceptions, dateStr]
+      }
+    });
+
+    // Create new one-time event with edited values
+    const newEvent = {
+      ...editedEvent,
+      id: `${event.id}-${dateStr}`,
+      recurring: { ...editedEvent.recurring, enabled: false },
+      isRecurringOccurrence: false
+    };
+
+    onUpdate(newEvent, true); // Pass true to indicate this is an addition
+    setShowEditConfirm(false);
+    setIsEditing(false);
+    onClose();
+  };
+
+  const handleEditAll = () => {
+    onUpdate(editedEvent);
+    setShowEditConfirm(false);
     setIsEditing(false);
   };
   
@@ -749,6 +862,21 @@ const EventDetailOverlay = ({ event, onClose, onUpdate, onDelete, familyMembers 
                       ))}
                     </div>
                   </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">End date (optional)</label>
+                    <input
+                      type="date"
+                      value={editedEvent.recurring?.endDate || ''}
+                      onChange={(e) => setEditedEvent({
+                        ...editedEvent,
+                        recurring: { ...editedEvent.recurring, endDate: e.target.value || undefined }
+                      })}
+                      min={getDateValue(editedEvent.startTime)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">Leave blank to repeat indefinitely</p>
+                  </div>
                 </div>
               )}
             </>
@@ -800,14 +928,30 @@ const EventDetailOverlay = ({ event, onClose, onUpdate, onDelete, familyMembers 
                 <div className="bg-gray-100 rounded-lg p-4">
                   <label className="flex items-center gap-3 cursor-pointer">
                     <button
-                      onClick={() => onUpdate({ ...event, completed: !event.completed })}
+                      onClick={() => {
+                        const dateStr = new Date(event.startTime).toISOString().split('T')[0];
+                        const completions = event.completions || [];
+                        const isCompleted = completions.includes(dateStr);
+
+                        const newCompletions = isCompleted
+                          ? completions.filter(d => d !== dateStr)
+                          : [...completions, dateStr];
+
+                        onUpdate({ ...event, completions: newCompletions });
+                      }}
                       className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${
-                        event.completed ? 'bg-green-500 border-green-500 text-white' : 'border-gray-300'
+                        (event.completions || []).includes(new Date(event.startTime).toISOString().split('T')[0])
+                          ? 'bg-green-500 border-green-500 text-white'
+                          : 'border-gray-300'
                       }`}
                     >
-                      {event.completed && <Check size={14} />}
+                      {(event.completions || []).includes(new Date(event.startTime).toISOString().split('T')[0]) && <Check size={14} />}
                     </button>
-                    <span className="font-medium">{event.completed ? 'Completed ✓' : 'Mark as complete'}</span>
+                    <span className="font-medium">
+                      {(event.completions || []).includes(new Date(event.startTime).toISOString().split('T')[0])
+                        ? 'Completed ✓'
+                        : 'Mark as complete'}
+                    </span>
                   </label>
                 </div>
               )}
@@ -815,6 +959,7 @@ const EventDetailOverlay = ({ event, onClose, onUpdate, onDelete, familyMembers 
               {event.recurring?.enabled && (
                 <p className="text-xs text-gray-500">
                   Repeats {event.recurring.frequency} on {event.recurring.days?.join(', ')}
+                  {event.recurring.endDate && ` until ${new Date(event.recurring.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}
                 </p>
               )}
             </>
@@ -823,7 +968,7 @@ const EventDetailOverlay = ({ event, onClose, onUpdate, onDelete, familyMembers 
         
         <div className="flex items-center justify-between p-4 border-t bg-gray-50">
           <button
-            onClick={() => { onDelete(event.id); onClose(); }}
+            onClick={handleDeleteClick}
             className="flex items-center gap-2 px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
           >
             <Trash2 size={16} />
@@ -856,6 +1001,70 @@ const EventDetailOverlay = ({ event, onClose, onUpdate, onDelete, familyMembers 
             </button>
           )}
         </div>
+
+        {/* Delete Confirmation Dialog for Recurring Events */}
+        {showDeleteConfirm && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-2xl p-6 max-w-sm mx-4">
+              <h3 className="text-lg font-semibold mb-4">Delete Recurring Event</h3>
+              <p className="text-gray-600 mb-6">
+                This is a recurring {event.isChore ? 'chore' : 'activity'}. Do you want to delete just this occurrence or all occurrences?
+              </p>
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={handleDeleteOccurrence}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+                >
+                  Delete This Occurrence
+                </button>
+                <button
+                  onClick={handleDeleteAll}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+                >
+                  Delete All Occurrences
+                </button>
+                <button
+                  onClick={() => setShowDeleteConfirm(false)}
+                  className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Edit Confirmation Dialog for Recurring Events */}
+        {showEditConfirm && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-2xl p-6 max-w-sm mx-4">
+              <h3 className="text-lg font-semibold mb-4">Edit Recurring Event</h3>
+              <p className="text-gray-600 mb-6">
+                This is a recurring {event.isChore ? 'chore' : 'activity'}. Do you want to edit just this occurrence or all occurrences?
+              </p>
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={handleEditOccurrence}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  Edit This Occurrence
+                </button>
+                <button
+                  onClick={handleEditAll}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  Edit All Occurrences
+                </button>
+                <button
+                  onClick={() => setShowEditConfirm(false)}
+                  className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -874,6 +1083,7 @@ const AddEventDialog = ({ onClose, onAdd, selectedDate, familyMembers, defaultSt
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurringFrequency, setRecurringFrequency] = useState('weekly');
   const [recurringDays, setRecurringDays] = useState([]);
+  const [recurringEndDate, setRecurringEndDate] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
   
   // Update times if defaults change (e.g., clicking different spot on calendar)
@@ -909,7 +1119,12 @@ const AddEventDialog = ({ onClose, onAdd, selectedDate, familyMembers, defaultSt
       isChore,
       completed: false,
       isAllDay,
-      recurring: isRecurring ? { enabled: true, frequency: recurringFrequency, days: recurringDays } : { enabled: false }
+      recurring: isRecurring ? {
+        enabled: true,
+        frequency: recurringFrequency,
+        days: recurringDays,
+        endDate: recurringEndDate || undefined
+      } : { enabled: false }
     });
     onClose();
   };
@@ -1106,6 +1321,18 @@ const AddEventDialog = ({ onClose, onAdd, selectedDate, familyMembers, defaultSt
                     </button>
                   ))}
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">End date (optional)</label>
+                <input
+                  type="date"
+                  value={recurringEndDate}
+                  onChange={(e) => setRecurringEndDate(e.target.value)}
+                  min={date}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <p className="text-xs text-gray-500 mt-1">Leave blank to repeat indefinitely</p>
               </div>
             </div>
           )}
@@ -1968,9 +2195,15 @@ export default function FamilyPlannerApp() {
         <EventDetailOverlay
           event={selectedEvent}
           onClose={() => setSelectedEvent(null)}
-          onUpdate={(updated) => {
-            setEvents(prev => prev.map(e => e.id === updated.id ? updated : e));
-            setSelectedEvent(updated);
+          onUpdate={(updated, isAddition = false) => {
+            if (isAddition) {
+              // Adding a new event (for edited single occurrence)
+              setEvents(prev => [...prev, updated]);
+            } else {
+              // Updating existing event
+              setEvents(prev => prev.map(e => e.id === updated.id ? updated : e));
+              setSelectedEvent(updated);
+            }
           }}
           onDelete={(id) => setEvents(prev => prev.filter(e => e.id !== id))}
           familyMembers={familyMembers}
