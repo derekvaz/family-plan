@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Plus, X, CheckCircle, Circle, ChevronLeft, ChevronRight,
-  Trash2, Clock, Calendar, Check, Settings, UserPlus, Edit2, Repeat
+  Trash2, Clock, Calendar, Check, Settings, UserPlus, Edit2, Repeat,
+  RefreshCw, Link2, Rss, AlertCircle, ExternalLink
 } from 'lucide-react';
+import ICAL from 'ical.js';
 
 // Accessible color palette for family members
 const DEFAULT_FAMILY_MEMBERS = [
@@ -405,6 +407,96 @@ const saveMembersToStorage = (members) => {
   try { localStorage.setItem(MEMBERS_STORAGE_KEY, JSON.stringify(members)); } catch (e) {}
 };
 
+// Calendar Feeds Storage
+const FEEDS_STORAGE_KEY = 'family-chores-app-feeds';
+const SYNCED_EVENTS_STORAGE_KEY = 'family-chores-app-synced-events';
+
+const loadFeedsFromStorage = () => {
+  try {
+    const data = localStorage.getItem(FEEDS_STORAGE_KEY);
+    return data ? JSON.parse(data) : [];
+  } catch (e) { return []; }
+};
+
+const saveFeedsToStorage = (feeds) => {
+  try { localStorage.setItem(FEEDS_STORAGE_KEY, JSON.stringify(feeds)); } catch (e) {}
+};
+
+const loadSyncedEventsFromStorage = () => {
+  try {
+    const data = localStorage.getItem(SYNCED_EVENTS_STORAGE_KEY);
+    return data ? JSON.parse(data) : [];
+  } catch (e) { return []; }
+};
+
+const saveSyncedEventsToStorage = (events) => {
+  try { localStorage.setItem(SYNCED_EVENTS_STORAGE_KEY, JSON.stringify(events)); } catch (e) {}
+};
+
+// iCal Parser Utility
+const parseICalFeed = (icalText) => {
+  try {
+    const jcalData = ICAL.parse(icalText);
+    const comp = new ICAL.Component(jcalData);
+    const vevents = comp.getAllSubcomponents('vevent');
+
+    return vevents.map(vevent => {
+      const event = new ICAL.Event(vevent);
+      return {
+        uid: event.uid,
+        summary: event.summary || 'Untitled Event',
+        description: event.description || '',
+        location: event.location || null,
+        startDate: event.startDate?.toJSDate()?.toISOString() || null,
+        endDate: event.endDate?.toJSDate()?.toISOString() || null,
+        isAllDay: event.startDate?.isDate || false,
+      };
+    }).filter(e => e.startDate);
+  } catch (e) {
+    console.error('Error parsing iCal feed:', e);
+    return [];
+  }
+};
+
+const convertToAppEvent = (icalEvent, feedConfig) => {
+  return {
+    id: `synced-${feedConfig.id}-${icalEvent.uid}`,
+    title: icalEvent.summary,
+    description: icalEvent.description,
+    location: icalEvent.location,
+    assignees: feedConfig.assignees,
+    startTime: icalEvent.startDate,
+    endTime: icalEvent.endDate || icalEvent.startDate,
+    isChore: false,
+    completed: false,
+    isAllDay: icalEvent.isAllDay,
+    isExternal: true,
+    feedId: feedConfig.id,
+    externalUid: icalEvent.uid,
+    recurring: { enabled: false }
+  };
+};
+
+const syncFeed = async (feed) => {
+  try {
+    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(feed.url)}`;
+    const response = await fetch(proxyUrl);
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const icalText = await response.text();
+    const parsedEvents = parseICalFeed(icalText);
+    const appEvents = parsedEvents.map(e => convertToAppEvent(e, feed));
+
+    return { success: true, events: appEvents, error: null };
+  } catch (error) {
+    console.error('Error syncing feed:', error);
+    return { success: false, events: [], error: error.message };
+  }
+};
+
 // Event Card Component
 const EventCard = ({ event, onClick, style, familyMembers }) => {
   const getMember = (id) => familyMembers.find(m => m.id === id);
@@ -436,6 +528,11 @@ const EventCard = ({ event, onClick, style, familyMembers }) => {
   const textColor = getTextColor(event.assignees);
   const outlineColor = event.isChore ? getOutlineColor(event.assignees) : 'transparent';
 
+  // External events get a dashed border
+  const borderStyle = event.isExternal
+    ? `2px dashed ${outlineColor}`
+    : event.isChore ? `2px solid ${outlineColor}` : 'none';
+
   return (
     <div
       onClick={(e) => { e.stopPropagation(); onClick(event); }}
@@ -446,10 +543,12 @@ const EventCard = ({ event, onClick, style, familyMembers }) => {
       style={{
         ...style,
         background,
-        border: event.isChore ? `2px solid ${outlineColor}` : 'none',
+        border: borderStyle,
       }}
     >
-      {event.isChore && (
+      {event.isExternal ? (
+        <Link2 size={12} style={{ color: textColor, flexShrink: 0, marginTop: 1, opacity: 0.7 }} />
+      ) : event.isChore && (
         isCompleted ?
           <CheckCircle size={12} style={{ color: textColor, flexShrink: 0, marginTop: 1 }} /> :
           <Circle size={12} style={{ color: textColor, flexShrink: 0, marginTop: 1 }} />
@@ -883,22 +982,37 @@ const EventDetailOverlay = ({ event, onClose, onUpdate, onDelete, familyMembers 
           ) : (
             <>
               {/* View Mode */}
-              <h2 className="text-2xl font-bold">{event.title}</h2>
-              
+              <h2 className="text-2xl font-bold flex items-center gap-2">
+                {event.title}
+                {event.isExternal && (
+                  <span className="text-sm font-normal text-gray-500 flex items-center gap-1">
+                    <ExternalLink size={14} />
+                    Synced
+                  </span>
+                )}
+              </h2>
+
               {event.description && (
                 <p className="text-gray-600">{event.description}</p>
               )}
-              
+
+              {event.location && (
+                <div className="flex items-center gap-2 text-sm text-gray-600">
+                  <span className="font-medium">Location:</span>
+                  <span>{event.location}</span>
+                </div>
+              )}
+
               <div className="flex items-center gap-2 text-sm text-gray-600">
                 <Clock size={16} />
                 <span>
-                  {event.isAllDay 
+                  {event.isAllDay
                     ? `All day · ${startDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}`
                     : `${formatTime(event.startTime)} - ${formatTime(event.endTime)} · ${startDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}`
                   }
                 </span>
               </div>
-              
+
               <div>
                 <p className="text-sm text-gray-500 mb-2">Assigned to:</p>
                 <div className="flex flex-wrap gap-2">
@@ -911,7 +1025,7 @@ const EventDetailOverlay = ({ event, onClose, onUpdate, onDelete, familyMembers 
                         className="px-3 py-1 rounded-full text-sm font-medium flex items-center gap-2"
                         style={{ backgroundColor: member?.lightColor, color: member?.textColor }}
                       >
-                        <span 
+                        <span
                           className="w-5 h-5 rounded-full flex items-center justify-center text-white text-xs"
                           style={{ backgroundColor: member?.color }}
                         >
@@ -923,8 +1037,8 @@ const EventDetailOverlay = ({ event, onClose, onUpdate, onDelete, familyMembers 
                   })}
                 </div>
               </div>
-              
-              {event.isChore && (
+
+              {event.isChore && !event.isExternal && (
                 <div className="bg-gray-100 rounded-lg p-4">
                   <label className="flex items-center gap-3 cursor-pointer">
                     <button
@@ -955,50 +1069,70 @@ const EventDetailOverlay = ({ event, onClose, onUpdate, onDelete, familyMembers 
                   </label>
                 </div>
               )}
-              
+
               {event.recurring?.enabled && (
                 <p className="text-xs text-gray-500">
                   Repeats {event.recurring.frequency} on {event.recurring.days?.join(', ')}
                   {event.recurring.endDate && ` until ${new Date(event.recurring.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}
                 </p>
               )}
+
+              {event.isExternal && (
+                <div className="bg-blue-50 rounded-lg p-3 text-sm text-blue-700 flex items-center gap-2">
+                  <Link2 size={16} />
+                  <span>This event is synced from an external calendar and cannot be edited here.</span>
+                </div>
+              )}
             </>
           )}
         </div>
         
         <div className="flex items-center justify-between p-4 border-t bg-gray-50">
-          <button
-            onClick={handleDeleteClick}
-            className="flex items-center gap-2 px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-          >
-            <Trash2 size={16} />
-            Delete
-          </button>
-          
-          {isEditing ? (
-            <div className="flex gap-2">
+          {event.isExternal ? (
+            <div className="w-full text-center">
               <button
-                onClick={handleCancelEdit}
-                className="px-4 py-2 text-gray-700 hover:bg-gray-200 rounded-lg transition-colors"
+                onClick={onClose}
+                className="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg transition-colors"
               >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveEdit}
-                disabled={!editedEvent.title.trim()}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
-              >
-                Save
+                Close
               </button>
             </div>
           ) : (
-            <button
-              onClick={handleStartEdit}
-              className="flex items-center gap-2 px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg transition-colors"
-            >
-              <Edit2 size={16} />
-              Edit
-            </button>
+            <>
+              <button
+                onClick={handleDeleteClick}
+                className="flex items-center gap-2 px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+              >
+                <Trash2 size={16} />
+                Delete
+              </button>
+
+              {isEditing ? (
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleCancelEdit}
+                    className="px-4 py-2 text-gray-700 hover:bg-gray-200 rounded-lg transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveEdit}
+                    disabled={!editedEvent.title.trim()}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+                  >
+                    Save
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={handleStartEdit}
+                  className="flex items-center gap-2 px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg transition-colors"
+                >
+                  <Edit2 size={16} />
+                  Edit
+                </button>
+              )}
+            </>
           )}
         </div>
 
@@ -1446,13 +1580,22 @@ const MonthPickerDialog = ({ onClose, currentDate, onSelectDate }) => {
 };
 
 // Settings Dialog
-const SettingsDialog = ({ onClose, familyMembers, onUpdateMembers, onRemoveMember }) => {
+const SettingsDialog = ({ onClose, familyMembers, onUpdateMembers, onRemoveMember, feeds, onUpdateFeeds, onSyncFeeds, syncingFeeds }) => {
+  const [activeTab, setActiveTab] = useState('members');
   const [newMemberName, setNewMemberName] = useState('');
   const [selectedColor, setSelectedColor] = useState(COLOR_OPTIONS[0]);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [editingMemberId, setEditingMemberId] = useState(null);
   const [editingName, setEditingName] = useState('');
   const [editingColor, setEditingColor] = useState(null);
+
+  // Feed management state
+  const [newFeedName, setNewFeedName] = useState('');
+  const [newFeedUrl, setNewFeedUrl] = useState('');
+  const [newFeedAssignees, setNewFeedAssignees] = useState([]);
+  const [editingFeedId, setEditingFeedId] = useState(null);
+  const [editingFeed, setEditingFeed] = useState(null);
+  const [feedConfirmDelete, setFeedConfirmDelete] = useState(null);
   
   const handleAddMember = () => {
     if (!newMemberName.trim()) return;
@@ -1511,26 +1654,127 @@ const SettingsDialog = ({ onClose, familyMembers, onUpdateMembers, onRemoveMembe
     setEditingName('');
     setEditingColor(null);
   };
-  
+
   // Get the member being edited for preview
   const editingMember = editingMemberId ? familyMembers.find(m => m.id === editingMemberId) : null;
+
+  // Feed management handlers
+  const handleAddFeed = () => {
+    if (!newFeedName.trim() || !newFeedUrl.trim()) return;
+
+    const newFeed = {
+      id: `feed-${Date.now()}`,
+      name: newFeedName.trim(),
+      url: newFeedUrl.trim(),
+      assignees: newFeedAssignees.length > 0 ? newFeedAssignees : [familyMembers[0]?.id].filter(Boolean),
+      enabled: true,
+      lastSync: null,
+      syncError: null
+    };
+
+    onUpdateFeeds([...feeds, newFeed]);
+    setNewFeedName('');
+    setNewFeedUrl('');
+    setNewFeedAssignees([]);
+  };
+
+  const handleRemoveFeed = (feedId) => {
+    onUpdateFeeds(feeds.filter(f => f.id !== feedId));
+    setFeedConfirmDelete(null);
+  };
+
+  const handleToggleFeed = (feedId) => {
+    onUpdateFeeds(feeds.map(f =>
+      f.id === feedId ? { ...f, enabled: !f.enabled } : f
+    ));
+  };
+
+  const handleStartEditFeed = (feed) => {
+    setEditingFeedId(feed.id);
+    setEditingFeed({ ...feed });
+    setFeedConfirmDelete(null);
+  };
+
+  const handleSaveEditFeed = () => {
+    if (!editingFeed?.name?.trim() || !editingFeed?.url?.trim()) {
+      handleCancelEditFeed();
+      return;
+    }
+
+    onUpdateFeeds(feeds.map(f =>
+      f.id === editingFeedId ? { ...editingFeed, name: editingFeed.name.trim(), url: editingFeed.url.trim() } : f
+    ));
+    handleCancelEditFeed();
+  };
+
+  const handleCancelEditFeed = () => {
+    setEditingFeedId(null);
+    setEditingFeed(null);
+  };
+
+  const toggleFeedAssignee = (id, isEditing = false) => {
+    if (isEditing && editingFeed) {
+      const newAssignees = editingFeed.assignees.includes(id)
+        ? editingFeed.assignees.filter(a => a !== id)
+        : [...editingFeed.assignees, id];
+      if (newAssignees.length > 0) {
+        setEditingFeed({ ...editingFeed, assignees: newAssignees });
+      }
+    } else {
+      setNewFeedAssignees(prev =>
+        prev.includes(id) ? prev.filter(a => a !== id) : [...prev, id]
+      );
+    }
+  };
   
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div 
+      <div
         className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-auto"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between p-4 border-b">
           <div className="flex items-center gap-2">
             <Settings size={20} />
-            <span className="font-semibold">Family Settings</span>
+            <span className="font-semibold">Settings</span>
           </div>
           <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded-full" aria-label="Close">
             <X size={20} />
           </button>
         </div>
-        
+
+        {/* Tab Navigation */}
+        <div className="flex border-b border-gray-200">
+          <button
+            onClick={() => setActiveTab('members')}
+            className={`flex-1 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === 'members'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <span className="flex items-center justify-center gap-2">
+              <UserPlus size={16} />
+              Family Members
+            </span>
+          </button>
+          <button
+            onClick={() => setActiveTab('feeds')}
+            className={`flex-1 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === 'feeds'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <span className="flex items-center justify-center gap-2">
+              <Rss size={16} />
+              Calendar Feeds
+            </span>
+          </button>
+        </div>
+
+        {/* Family Members Tab */}
+        {activeTab === 'members' && (
         <div className="p-4 space-y-6">
           {/* Current Family Members */}
           <div>
@@ -1750,14 +1994,259 @@ const SettingsDialog = ({ onClose, familyMembers, onUpdateMembers, onRemoveMembe
               </div>
             </div>
           )}
+
+          <div className="mt-4 pt-4 border-t">
+            <p className="text-xs text-gray-500 text-center">
+              Removing a family member will delete any activities or chores they are solely assigned to,
+              and remove them from shared activities.
+            </p>
+          </div>
         </div>
-        
-        <div className="p-4 border-t bg-gray-50">
-          <p className="text-xs text-gray-500 text-center">
-            Removing a family member will delete any activities or chores they are solely assigned to, 
-            and remove them from shared activities.
-          </p>
+        )}
+
+        {/* Calendar Feeds Tab */}
+        {activeTab === 'feeds' && (
+        <div className="p-4 space-y-6">
+          {/* Existing Feeds */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-700">Calendar Feeds</h3>
+              {feeds.length > 0 && (
+                <button
+                  onClick={() => onSyncFeeds()}
+                  disabled={syncingFeeds}
+                  className="flex items-center gap-1 px-3 py-1 text-xs bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 disabled:opacity-50 transition-colors"
+                >
+                  <RefreshCw size={12} className={syncingFeeds ? 'animate-spin' : ''} />
+                  {syncingFeeds ? 'Syncing...' : 'Refresh All'}
+                </button>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              {feeds.map(feed => {
+                const isEditing = editingFeedId === feed.id;
+
+                return (
+                  <div
+                    key={feed.id}
+                    className={`p-3 rounded-lg border ${feed.enabled ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 opacity-60'}`}
+                  >
+                    {isEditing ? (
+                      <div className="space-y-3">
+                        <input
+                          type="text"
+                          value={editingFeed?.name || ''}
+                          onChange={(e) => setEditingFeed({ ...editingFeed, name: e.target.value })}
+                          placeholder="Feed name"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                        />
+                        <input
+                          type="url"
+                          value={editingFeed?.url || ''}
+                          onChange={(e) => setEditingFeed({ ...editingFeed, url: e.target.value })}
+                          placeholder="iCal URL"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                        />
+                        <div>
+                          <label className="block text-xs text-gray-600 mb-1">Assign to:</label>
+                          <div className="flex flex-wrap gap-1">
+                            {familyMembers.map(member => (
+                              <button
+                                key={member.id}
+                                onClick={() => toggleFeedAssignee(member.id, true)}
+                                className={`px-2 py-1 rounded-full text-xs font-medium transition-all ${
+                                  editingFeed?.assignees?.includes(member.id)
+                                    ? 'ring-2 ring-offset-1'
+                                    : 'opacity-50 hover:opacity-100'
+                                }`}
+                                style={{
+                                  backgroundColor: member.lightColor,
+                                  color: member.textColor,
+                                  ringColor: member.color
+                                }}
+                              >
+                                {member.name}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="flex gap-2 justify-end">
+                          <button
+                            onClick={handleCancelEditFeed}
+                            className="px-3 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded-lg"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={handleSaveEditFeed}
+                            className="px-3 py-1 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <Rss size={14} className={feed.enabled ? 'text-blue-500' : 'text-gray-400'} />
+                              <span className="font-medium text-sm truncate">{feed.name}</span>
+                            </div>
+                            <p className="text-xs text-gray-500 truncate mt-0.5">{feed.url}</p>
+                            {feed.syncError && (
+                              <p className="text-xs text-red-500 flex items-center gap-1 mt-1">
+                                <AlertCircle size={12} />
+                                {feed.syncError}
+                              </p>
+                            )}
+                            {feed.lastSync && !feed.syncError && (
+                              <p className="text-xs text-gray-400 mt-1">
+                                Last synced: {new Date(feed.lastSync).toLocaleString()}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1 flex-shrink-0">
+                            <button
+                              onClick={() => handleToggleFeed(feed.id)}
+                              className={`p-1.5 rounded-lg transition-colors ${
+                                feed.enabled
+                                  ? 'text-green-600 hover:bg-green-50'
+                                  : 'text-gray-400 hover:bg-gray-100'
+                              }`}
+                              title={feed.enabled ? 'Disable feed' : 'Enable feed'}
+                            >
+                              {feed.enabled ? <CheckCircle size={16} /> : <Circle size={16} />}
+                            </button>
+                            <button
+                              onClick={() => handleStartEditFeed(feed)}
+                              className="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg"
+                            >
+                              <Edit2 size={14} />
+                            </button>
+                            {feedConfirmDelete === feed.id ? (
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => handleRemoveFeed(feed.id)}
+                                  className="px-2 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700"
+                                >
+                                  Yes
+                                </button>
+                                <button
+                                  onClick={() => setFeedConfirmDelete(null)}
+                                  className="px-2 py-1 bg-gray-300 text-gray-700 text-xs rounded hover:bg-gray-400"
+                                >
+                                  No
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => setFeedConfirmDelete(feed.id)}
+                                className="p-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {feed.assignees.map(id => {
+                            const member = familyMembers.find(m => m.id === id);
+                            if (!member) return null;
+                            return (
+                              <span
+                                key={id}
+                                className="px-2 py-0.5 rounded-full text-xs"
+                                style={{ backgroundColor: member.lightColor, color: member.textColor }}
+                              >
+                                {member.name}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {feeds.length === 0 && (
+                <p className="text-center text-gray-500 py-4 text-sm">
+                  No calendar feeds yet. Add one below to sync external calendars.
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Add New Feed */}
+          {!editingFeedId && (
+            <div className="border-t pt-4">
+              <h3 className="text-sm font-semibold text-gray-700 mb-3">Add Calendar Feed</h3>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">Feed Name</label>
+                  <input
+                    type="text"
+                    value={newFeedName}
+                    onChange={(e) => setNewFeedName(e.target.value)}
+                    placeholder="e.g., Work Calendar"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">iCal URL</label>
+                  <input
+                    type="url"
+                    value={newFeedUrl}
+                    onChange={(e) => setNewFeedUrl(e.target.value)}
+                    placeholder="https://calendar.google.com/..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Find iCal URLs in your calendar settings (Google, Apple, Outlook)
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-600 mb-2">Assign events to:</label>
+                  <div className="flex flex-wrap gap-2">
+                    {familyMembers.map(member => (
+                      <button
+                        key={member.id}
+                        onClick={() => toggleFeedAssignee(member.id)}
+                        className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all ${
+                          newFeedAssignees.includes(member.id)
+                            ? 'ring-2 ring-offset-1'
+                            : 'opacity-60 hover:opacity-100'
+                        }`}
+                        style={{
+                          backgroundColor: member.lightColor,
+                          color: member.textColor,
+                          ringColor: member.color
+                        }}
+                      >
+                        {member.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleAddFeed}
+                  disabled={!newFeedName.trim() || !newFeedUrl.trim()}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Rss size={18} />
+                  Add Feed
+                </button>
+              </div>
+            </div>
+          )}
         </div>
+        )}
       </div>
     </div>
   );
@@ -1767,6 +2256,9 @@ const SettingsDialog = ({ onClose, familyMembers, onUpdateMembers, onRemoveMembe
 export default function FamilyPlannerApp() {
   const [familyMembers, setFamilyMembers] = useState(() => loadMembersFromStorage() || DEFAULT_FAMILY_MEMBERS);
   const [events, setEvents] = useState(() => loadFromStorage() || []);
+  const [feeds, setFeeds] = useState(() => loadFeedsFromStorage());
+  const [syncedEvents, setSyncedEvents] = useState(() => loadSyncedEventsFromStorage());
+  const [syncingFeeds, setSyncingFeeds] = useState(false);
   const [filter, setFilter] = useState('all');
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedEvent, setSelectedEvent] = useState(null);
@@ -1793,6 +2285,59 @@ export default function FamilyPlannerApp() {
   
   useEffect(() => { saveToStorage(events); }, [events]);
   useEffect(() => { saveMembersToStorage(familyMembers); }, [familyMembers]);
+  useEffect(() => { saveFeedsToStorage(feeds); }, [feeds]);
+  useEffect(() => { saveSyncedEventsToStorage(syncedEvents); }, [syncedEvents]);
+
+  // Sync all enabled feeds
+  const syncAllFeeds = useCallback(async () => {
+    const enabledFeeds = feeds.filter(f => f.enabled);
+    if (enabledFeeds.length === 0) return;
+
+    setSyncingFeeds(true);
+
+    const updatedFeeds = [...feeds];
+    let allSyncedEvents = [];
+
+    for (const feed of enabledFeeds) {
+      const result = await syncFeed(feed);
+      const feedIndex = updatedFeeds.findIndex(f => f.id === feed.id);
+
+      if (result.success) {
+        updatedFeeds[feedIndex] = {
+          ...updatedFeeds[feedIndex],
+          lastSync: new Date().toISOString(),
+          syncError: null
+        };
+        allSyncedEvents = [...allSyncedEvents, ...result.events];
+      } else {
+        updatedFeeds[feedIndex] = {
+          ...updatedFeeds[feedIndex],
+          syncError: result.error
+        };
+        // Keep existing events for this feed on error
+        const existingFeedEvents = syncedEvents.filter(e => e.feedId === feed.id);
+        allSyncedEvents = [...allSyncedEvents, ...existingFeedEvents];
+      }
+    }
+
+    // Also keep events from disabled feeds
+    const disabledFeedEvents = syncedEvents.filter(e => {
+      const feed = feeds.find(f => f.id === e.feedId);
+      return feed && !feed.enabled;
+    });
+
+    setFeeds(updatedFeeds);
+    setSyncedEvents([...allSyncedEvents, ...disabledFeedEvents]);
+    setSyncingFeeds(false);
+  }, [feeds, syncedEvents]);
+
+  // Sync feeds on initial load
+  useEffect(() => {
+    const hasEnabledFeeds = feeds.some(f => f.enabled);
+    if (hasEnabledFeeds) {
+      syncAllFeeds();
+    }
+  }, []); // Only run on mount
   
   useEffect(() => {
     if (calendarRef.current) {
@@ -1844,10 +2389,17 @@ export default function FamilyPlannerApp() {
     return member?.textColor || '#1F2937';
   };
   
+  // Combine local events with synced events from enabled feeds
+  const allEvents = useMemo(() => {
+    const enabledFeedIds = feeds.filter(f => f.enabled).map(f => f.id);
+    const activeSyncedEvents = syncedEvents.filter(e => enabledFeedIds.includes(e.feedId));
+    return [...events, ...activeSyncedEvents];
+  }, [events, syncedEvents, feeds]);
+
   const filteredEvents = useMemo(() => {
-    if (filter === 'all') return events;
-    return events.filter(e => e.assignees.includes(filter));
-  }, [events, filter]);
+    if (filter === 'all') return allEvents;
+    return allEvents.filter(e => e.assignees.includes(filter));
+  }, [allEvents, filter]);
   
   const getEventsForDay = useCallback((date) => {
     const results = [];
@@ -2224,6 +2776,10 @@ export default function FamilyPlannerApp() {
           familyMembers={familyMembers}
           onUpdateMembers={setFamilyMembers}
           onRemoveMember={handleRemoveMember}
+          feeds={feeds}
+          onUpdateFeeds={setFeeds}
+          onSyncFeeds={syncAllFeeds}
+          syncingFeeds={syncingFeeds}
         />
       )}
     </div>
